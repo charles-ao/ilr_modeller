@@ -374,3 +374,7 @@ figcaption { color: var(--muted); font-size: 0.9rem; margin-top: 8px; }
   .headline, .table thead th, .tl-window, .bar-pass { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.8em; color: var(--muted); }
 }
+
+/* Plan editor sub-sections */
+.plan-sub { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 14px; }
+.plan-sub + .field { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 14px; }

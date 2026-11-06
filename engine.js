@@ -188,7 +188,7 @@ function validate(raw, rules, { asOf } = {}) {
   for (const key of ["A", "B"]) {
     const s = raw?.scenarios?.[key] || { mode: "keep" };
     const mode = s.mode === "projected" ? "projected" : "keep";
-    const out = { label: String(s.label || `Scenario ${key}`), mode, changes: [], growthPct: 0 };
+    const out = { label: String(s.label || `Scenario ${key}`), mode, changes: [], bonuses: [], growthPct: 0 };
     if (mode === "projected") {
       const seenC = new Set();
       (Array.isArray(s.changes) ? s.changes : []).forEach((c, i) => {
@@ -229,6 +229,38 @@ function validate(raw, rules, { asOf } = {}) {
         else if (gn < -20 || gn > 30) err(`scenarios.${key}.growthPct`, "Enter a yearly change between -20% and 30%.");
         else out.growthPct = gn;
       }
+
+      // One-off payments (bonus, commission): counted in the month paid only.
+      (Array.isArray(s.bonuses) ? s.bonuses : []).forEach((b, i) => {
+        const p = `scenarios.${key}.bonuses.${i}`;
+        const month = parseMonth(b?.month);
+        const amount = parseSalary(b?.amount);
+        let ok = true;
+        if (!nonEmpty(b?.month)) {
+          err(`${p}.month`, "Enter the month this payment is made."); ok = false;
+        } else if (month === null) {
+          err(`${p}.month`, "Enter a month in the format YYYY-MM."); ok = false;
+        } else if (lastDataMonth !== null && month <= lastDataMonth) {
+          err(`${p}.month`, source === "hmrc"
+            ? `A one-off payment must be after your HMRC figures end (${formatMonth(lastDataMonth)}). Earlier bonuses are already in your HMRC totals.`
+            : `A one-off payment must be after your current salary starts (${formatMonth(lastDataMonth)}).`); ok = false;
+        } else if (asOf !== undefined && month < asOf) {
+          err(`${p}.month`, "This date is in the past. One-off payments are for future months."); ok = false;
+        } else if (horizonEnd !== null && month >= horizonEnd) {
+          err(`${p}.month`, `This is after the end of the ${rules.horizonYears}-year horizon (${formatMonth(horizonEnd)}).`); ok = false;
+        }
+        if (!nonEmpty(b?.amount)) {
+          err(`${p}.amount`, "Enter the amount of the payment."); ok = false;
+        } else if (amount === null) {
+          err(`${p}.amount`, "Enter the amount in pounds, for example 5000."); ok = false;
+        } else if (amount <= 0) {
+          err(`${p}.amount`, "Enter an amount above £0."); ok = false;
+        } else if (amount > MAX_SALARY) {
+          err(`${p}.amount`, "That amount looks too large."); ok = false;
+        }
+        if (ok) out.bonuses.push({ month, amount });
+      });
+      out.bonuses.sort((a, b) => a.month - b.month);
     }
     scenarios[key] = out;
   }
@@ -407,10 +439,19 @@ function buildTimeline(model, key, rules, { asOf } = {}) {
     }
     annual[i] = value;
   }
+  // One-off payments are kept apart from the salary rate (so growth and
+  // "raise" explanations ignore them) but count in full in their month.
+  // Values are stored as annual equivalents (x12) to match `annual`.
+  const extra = new Float64Array(length);
+  const bonuses = sc && sc.mode === "projected" ? (sc.bonuses || []) : [];
+  for (const b of bonuses) {
+    const i = b.month - start;
+    if (i >= 0 && i < length) extra[i] += b.amount * 12;
+  }
   const prefix = new Float64Array(length + 1);
-  for (let i = 0; i < length; i++) prefix[i + 1] = prefix[i] + annual[i];
+  for (let i = 0; i < length; i++) prefix[i + 1] = prefix[i] + annual[i] + extra[i];
   return {
-    key, start, end, length, annual, prefix, steps, growth, growthAnchor: anchor,
+    key, start, end, length, annual, extra, prefix, steps, growth, growthAnchor: anchor, bonuses,
     source: model.source || "periods",
     dataEnd: model.source === "hmrc" ? model.projStart : null
   };
@@ -602,9 +643,31 @@ function joinAnd(items) {
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
-/** Why a single counted year fell short. */
+/** One-off payments that fall inside months [a, b). */
+function bonusesIn(tl, a, b) {
+  return (tl.bonuses || []).filter((x) => x.month >= a && x.month < b);
+}
+
+const describeBonuses = (list) =>
+  joinAnd(list.map((x) => `${formatGBP(x.amount)} in ${formatMonth(x.month)}`));
+
+/** Why a single counted year fell short, or passed only thanks to a one-off payment. */
 function explainYear(tl, year, threshold, basis = "tax") {
-  if (year.pass) return `${year.label} passes with ${formatGBP(year.total)}.`;
+  const paid = bonusesIn(tl, year.start, year.end);
+  const sum = paid.reduce((t, x) => t + x.amount, 0);
+  if (year.pass) {
+    if (paid.length && year.total - sum < threshold - 1e-6) {
+      return `${year.label} passes only because of the one-off payment${paid.length > 1 ? "s" : ""} of ${describeBonuses(paid)}.`;
+    }
+    return `${year.label} passes with ${formatGBP(year.total)}.`;
+  }
+  const base = explainShortfall(tl, year, threshold, basis);
+  return paid.length
+    ? `${base} That includes the one-off payment${paid.length > 1 ? "s" : ""} of ${describeBonuses(paid)}.`
+    : base;
+}
+
+function explainShortfall(tl, year, threshold, basis) {
   const short = formatGBP(year.shortBy);
   if (year.monthsBeforeStart > 0) {
     const onRoute = 12 - year.monthsBeforeStart;
@@ -667,7 +730,12 @@ function explain(tl, res, ev, rules) {
     lines.push(`Before ${formatMonth(res.horizonEnd)}, the end of the ${rules.horizonYears}-year horizon, at most ${res.maxPassCount} of the ${res.window} ${yearsWord} pass at any one time.`);
   }
 
-  for (const y of ev.years) if (!y.pass) lines.push(explainYear(tl, y, ev.threshold, res.basis));
+  for (const y of ev.years) {
+    if (!y.pass) { lines.push(explainYear(tl, y, ev.threshold, res.basis)); continue; }
+    // Point out years that pass only because of a one-off payment.
+    const paid = bonusesIn(tl, y.start, y.end).reduce((t, x) => t + x.amount, 0);
+    if (paid && y.total - paid < ev.threshold - 1e-6) lines.push(explainYear(tl, y, ev.threshold, res.basis));
+  }
   return lines;
 }
 

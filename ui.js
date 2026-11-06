@@ -50,8 +50,8 @@ const store = {
 let uid = 0;
 const newId = () => `r${++uid}`;
 const blankScenarios = () => ({
-  A: { label: "Keep current salary", mode: "keep", changes: [], growthPct: "" },
-  B: { label: "With projected changes", mode: "projected", changes: [], growthPct: "" }
+  A: { label: "Keep current salary", mode: "keep", changes: [], bonuses: [], growthPct: "" },
+  B: { label: "With projected changes", mode: "projected", changes: [], bonuses: [], growthPct: "" }
 });
 const blankHMRC = () => ({
   firstPart: "", firstFull: "", years: {}, ytd: "", ytdTo: "", currentSalary: "", currentSalaryAuto: true
@@ -94,11 +94,13 @@ function fromRaw(obj) {
       mode: sc.mode === "projected" ? "projected" : "keep",
       changes: (Array.isArray(sc.changes) ? sc.changes.slice(0, 120) : [])
         .map((c) => ({ id: newId(), from: monthStr(c?.from), salary: salaryStr(c?.salary) })),
+      bonuses: (Array.isArray(sc.bonuses) ? sc.bonuses.slice(0, 120) : [])
+        .map((b) => ({ id: newId(), month: monthStr(b?.month), amount: salaryStr(b?.amount) })),
       growthPct: sc.growthPct === 0 || sc.growthPct === "0" ? "" : str(sc.growthPct)
     };
   }
   sortRows(s.history);
-  for (const k of KEYS) sortRows(s.scenarios[k].changes);
+  for (const k of KEYS) { sortRows(s.scenarios[k].changes); sortRows(s.scenarios[k].bonuses, "month"); }
   return s;
 }
 
@@ -112,6 +114,7 @@ function toRaw(s) {
     scenarios[k] = {
       label: sc.label, mode: sc.mode,
       changes: sc.changes.map((c) => ({ from: c.from, salary: num(c.salary) })),
+      bonuses: sc.bonuses.map((b) => ({ month: b.month, amount: num(b.amount) })),
       growthPct: g === "" ? 0 : (Number.isFinite(Number(g)) ? Number(g) : g)
     };
   }
@@ -129,8 +132,8 @@ function toRaw(s) {
 }
 
 /** Keep rows in date order; rows without a valid month stay at the end. */
-function sortRows(arr) {
-  const key = (r) => { const i = parseMonth(r.from); return i === null ? Infinity : i; };
+function sortRows(arr, field = "from") {
+  const key = (r) => { const i = parseMonth(r[field]); return i === null ? Infinity : i; };
   arr.sort((a, b) => key(a) - key(b));
   return arr;
 }
@@ -243,6 +246,26 @@ function rowHTML(kind, row, i, isCurrent) {
   </li>`;
 }
 
+function bonusRowHTML(row, i) {
+  const base = `scenarios.${ui.active}.bonuses.${i}`;
+  const mid = `${row.id}-month`, aid = `${row.id}-amount`;
+  const m = parseMonth(row.month);
+  const what = m !== null ? formatMonth(m) : `row ${i + 1}`;
+  return `<li class="row" data-id="${row.id}">
+    <div class="row-meta"><span class="badge">One-off</span></div>
+    <div class="field field-from">
+      <label class="label" for="${mid}">Paid in</label>
+      <input class="input month" id="${mid}" ${monthAttrs()} value="${esc(row.month)}" data-path="${base}.month" data-touch="${row.id}.month" aria-describedby="${mid}-err">
+    </div>
+    <div class="field">
+      <label class="label" for="${aid}">Amount</label>
+      <div class="money"><span aria-hidden="true">£</span><input class="input" id="${aid}" inputmode="decimal" value="${esc(row.amount)}" data-path="${base}.amount" data-touch="${row.id}.amount" data-salary aria-describedby="${aid}-err"></div>
+    </div>
+    <button type="button" class="icon-btn" data-action="remove" data-kind="bonus" data-id="${row.id}" aria-label="Remove one-off payment in ${esc(what)}">✕</button>
+    <div class="errors"><p class="field-error" id="${mid}-err" hidden></p><p class="field-error" id="${aid}-err" hidden></p></div>
+  </li>`;
+}
+
 function renderHistory() {
   const cur = currentIndex();
   $("#history-rows").innerHTML = state.history.map((r, i) => rowHTML("history", r, i, i === cur)).join("");
@@ -268,6 +291,7 @@ function renderPlan() {
       <label class="radio"><input type="radio" name="mode" value="projected" ${projected ? "checked" : ""}> Add projected changes</label>
     </fieldset>
     ${projected ? `
+      <h4 class="hm-title">Salary changes</h4>
       <p class="help">Add each future pay rise, pay cut or unpaid gap, with the month it starts.</p>
       <ol class="rows" id="change-rows">${sc.changes.map((c, i) => rowHTML("change", c, i, false)).join("")}</ol>
       ${sc.changes.length ? "" : '<p class="help"><em>No changes yet. Your current salary carries on.</em></p>'}
@@ -275,9 +299,15 @@ function renderPlan() {
         <button type="button" class="btn btn-secondary" data-action="add-change">+ Add change</button>
         <button type="button" class="btn btn-secondary" data-action="add-change-gap">+ Add gap</button>
       </div>
+      <div class="plan-sub">
+        <h4 class="hm-title">One-off payments <span class="optional">(optional)</span></h4>
+        <p class="help">A bonus, commission or other one-off taxable payment, in the month it's paid. It counts in full in that month only, and doesn't change your salary.</p>
+        <ol class="rows" id="bonus-rows">${sc.bonuses.map((b, i) => bonusRowHTML(b, i)).join("")}</ol>
+        <button type="button" class="btn btn-secondary" data-action="add-bonus">+ Add one-off payment</button>
+      </div>
       <div class="field">
         <label class="label" for="sc-growth">Yearly pay growth <span class="optional">(optional)</span></label>
-        <p class="help" id="sc-growth-help">For example, 3 for 3% a year. Applied every 12 months after your last change, or after today if that's later.</p>
+        <p class="help" id="sc-growth-help">For example, 3 for 3% a year. Applied to your salary, not one-off payments, every 12 months after your last change, or after today if that's later.</p>
         <div class="inline"><input class="input" id="sc-growth" inputmode="decimal" style="max-width:8em" value="${esc(sc.growthPct)}" data-path="scenarios.${k}.growthPct" data-touch="sc-${k}-growth" aria-describedby="sc-growth-help sc-growth-err"><span>% a year</span></div>
         <p class="field-error" id="sc-growth-err" hidden></p>
       </div>`
@@ -430,7 +460,7 @@ function setByPath(path, value) {
   else if (p[0] === "history") { if (state.history[+p[1]]) state.history[+p[1]][p[2]] = value; }
   else if (p[0] === "scenarios") {
     const sc = state.scenarios[p[1]];
-    if (p[2] === "changes") { if (sc.changes[+p[3]]) sc.changes[+p[3]][p[4]] = value; }
+    if (p[2] === "changes" || p[2] === "bonuses") { if (sc[p[2]][+p[3]]) sc[p[2]][+p[3]][p[4]] = value; }
     else sc[p[2]] = value;
   } else if (p[0] === "hmrc") {
     if (p[1] === "years") state.hmrc.years[p[2]] = value;
@@ -444,7 +474,7 @@ function setByPath(path, value) {
 function touchKey(path) {
   const p = path.split(".");
   if (p[0] === "history" && p.length === 3) return `${state.history[+p[1]]?.id}.${p[2]}`;
-  if (p[0] === "scenarios" && p[2] === "changes") return `${state.scenarios[p[1]].changes[+p[3]]?.id}.${p[4]}`;
+  if (p[0] === "scenarios" && (p[2] === "changes" || p[2] === "bonuses")) return `${state.scenarios[p[1]][p[2]][+p[3]]?.id}.${p[4]}`;
   if (p[0] === "scenarios" && p[2] === "growthPct") return `sc-${p[1]}-growth`;
   return path;
 }
@@ -453,7 +483,7 @@ function elementId(path) {
   const p = path.split(".");
   if (p[0] === "history" && p.length === 3) return `${state.history[+p[1]]?.id}-${p[2]}`;
   if (p[0] === "history") return `${state.history[0]?.id}-from`;
-  if (p[0] === "scenarios" && p[2] === "changes") return `${state.scenarios[p[1]].changes[+p[3]]?.id}-${p[4]}`;
+  if (p[0] === "scenarios" && (p[2] === "changes" || p[2] === "bonuses")) return `${state.scenarios[p[1]][p[2]][+p[3]]?.id}-${p[4]}`;
   if (p[0] === "scenarios" && p[2] === "growthPct") return "sc-growth";
   if (p[0] === "hmrc") return hmId(path);
   return path;
@@ -472,6 +502,7 @@ function describePath(path) {
   if (p[0] === "applyIn") return "Plan to apply in";
   if (p[0] === "history") return p.length === 3 ? `Salary history, row ${+p[1] + 1}` : "Salary history";
   if (p[0] === "scenarios" && p[2] === "changes") return `Scenario ${p[1]}, change ${+p[3] + 1}`;
+  if (p[0] === "scenarios" && p[2] === "bonuses") return `Scenario ${p[1]}, one-off payment ${+p[3] + 1}`;
   if (p[0] === "scenarios") return `Scenario ${p[1]}, yearly growth`;
   return path;
 }
@@ -909,7 +940,10 @@ function printSummaryHTML(model) {
   const plan = (k) => {
     const sc = model.scenarios[k];
     if (sc.mode === "keep") return "keep current salary";
-    const ch = sc.changes.map((c) => `${formatGBP(c.salary)} from ${formatMonth(c.from)}`).join(", ") || "no changes";
+    const ch = [
+      ...sc.changes.map((c) => `${formatGBP(c.salary)} from ${formatMonth(c.from)}`),
+      ...sc.bonuses.map((b) => `one-off ${formatGBP(b.amount)} in ${formatMonth(b.month)}`)
+    ].join(", ") || "no changes";
     return `${ch}${sc.growthPct ? `; ${sc.growthPct}% a year growth` : ""}`;
   };
   return `<div class="print-only block">
@@ -955,11 +989,15 @@ function loadState(raw, message) {
   if (message) status(message);
 }
 
+const rowsFor = (kind) => kind === "history" ? state.history
+  : kind === "bonus" ? state.scenarios[ui.active].bonuses : state.scenarios[ui.active].changes;
+const monthField = (kind) => (kind === "bonus" ? "month" : "from");
+
 function scheduleResort(kind) {
   setTimeout(() => {
-    const arr = kind === "history" ? state.history : state.scenarios[ui.active].changes;
+    const arr = rowsFor(kind);
     const before = arr.map((r) => r.id).join();
-    sortRows(arr);
+    sortRows(arr, monthField(kind));
     if (arr.map((r) => r.id).join() === before) return;
     const activeId = document.activeElement?.id;
     if (kind === "history") renderHistory(); else renderPlan();
@@ -969,15 +1007,15 @@ function scheduleResort(kind) {
 }
 
 function addRow(kind, gap) {
-  const row = { id: newId(), from: "", salary: gap ? "0" : "" };
-  if (kind === "history") { state.history.push(row); renderHistory(); }
-  else { state.scenarios[ui.active].changes.push(row); renderPlan(); }
+  const row = kind === "bonus" ? { id: newId(), month: "", amount: "" } : { id: newId(), from: "", salary: gap ? "0" : "" };
+  rowsFor(kind).push(row);
+  if (kind === "history") renderHistory(); else renderPlan();
   update();
-  document.getElementById(`${row.id}-from`)?.focus();
+  document.getElementById(`${row.id}-${monthField(kind)}`)?.focus();
 }
 
 function removeRow(kind, id) {
-  const arr = kind === "history" ? state.history : state.scenarios[ui.active].changes;
+  const arr = rowsFor(kind);
   const i = arr.findIndex((r) => r.id === id);
   if (i < 0) return;
   if (kind === "history" && arr.length === 1) { arr[0].from = ""; arr[0].salary = ""; }
@@ -985,7 +1023,8 @@ function removeRow(kind, id) {
   if (kind === "history") renderHistory(); else renderPlan();
   update();
   const next = arr[Math.min(i, arr.length - 1)];
-  (next ? document.getElementById(`${next.id}-from`) : $(`[data-action="${kind === "history" ? "add-history" : "add-change"}"]`))?.focus();
+  const addAction = { history: "add-history", change: "add-change", bonus: "add-bonus" }[kind];
+  (next ? document.getElementById(`${next.id}-${monthField(kind)}`) : $(`[data-action="${addAction}"]`))?.focus();
 }
 
 function bindForm() {
@@ -1031,6 +1070,7 @@ function bindForm() {
     }
     ui.touched.add(el.dataset.touch);
     if (el.dataset.path.endsWith(".from")) scheduleResort(el.dataset.path.startsWith("history") ? "history" : "change");
+    if (/\.bonuses\.\d+\.month$/.test(el.dataset.path)) scheduleResort("bonus");
     update();
   });
 
@@ -1050,6 +1090,7 @@ function bindForm() {
       case "add-gap": addRow("history", true); break;
       case "add-change": addRow("change", false); break;
       case "add-change-gap": addRow("change", true); break;
+      case "add-bonus": addRow("bonus", false); break;
       case "remove": removeRow(t.dataset.kind, t.dataset.id); break;
       case "prorata": estimatePartYear(); break;
       case "scenario": setActive(t.dataset.key); $(`#plan-switch [data-key="${t.dataset.key}"]`)?.focus(); break;

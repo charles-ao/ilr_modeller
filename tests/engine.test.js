@@ -10,7 +10,7 @@ const RULES = isNode ? require("../config.js").RULES : root.ILR_RULES;
 const {
   validate, analyseScenario, buildTimeline, evaluateAt, countedYears, explain,
   parseMonth, formatMonth, formatDate, formatGBP, parseSalary, encodeState, decodeState,
-  toCSV, BASES, hmrcRows, proRata, annualise
+  toCSV, BASES, hmrcRows, proRata, annualise, explainYear
 } = isNode ? require("../engine.js") : root.ILREngine;
 
 const AS_OF = parseMonth("2026-11");
@@ -285,6 +285,71 @@ test("HMRC CSV marks calendar and rolling as estimates", () => {
   const csv = toCSV([run(HM01)], { A: "Keep" }, RULES);
   ok(csv.includes("Keep,5-year,Calendar year (estimate),January 2027"), csv);
   ok(csv.includes("Keep,5-year,Tax year,6 April 2027"), csv);
+});
+
+// ---------------------------------------------------------------------------
+// One-off payments (bonuses) in projected changes
+
+// £48,000 steady is below £50,271, so the 5-year route is never met.
+// A £3,000 bonus each January lifts 2026/27, 2027/28 and 2028/29 to £51,000.
+function bonusCase(bonuses, source = "periods") {
+  const raw = scenarioFor([["2021-10", 48000]], "2021-10");
+  raw.scenarios.B = { label: "Bonuses", mode: "projected", changes: [], bonuses, growthPct: 0 };
+  return raw;
+}
+const JAN_BONUSES = [{ month: "2027-01", amount: 3000 }, { month: "2028-01", amount: 3000 }, { month: "2029-01", amount: 3000 }];
+
+test("BO-01 bonuses lift years over the threshold (5-year: tax Apr 2029, calendar Jan 2030, rolling Feb 2029)", () => {
+  const a = run(bonusCase(JAN_BONUSES), "B").results[5];
+  eq(short(a.tax.earliest), "Apr 2029", "tax");
+  eq(short(a.calendar.earliest), "Jan 2030", "calendar");
+  eq(short(a.rolling.earliest), "Feb 2029", "rolling");
+  eq(run(bonusCase(JAN_BONUSES), "A").results[5].tax.earliest, null, "A without bonuses is not reached");
+});
+test("BO-02 a bonus counts once, in its month, and is not treated as a salary rate or grown", () => {
+  const raw = bonusCase([{ month: "2027-01", amount: 3000 }]);
+  raw.scenarios.B.growthPct = 10;
+  const v = validate(raw, RULES, { asOf: AS_OF });
+  ok(v.ok, JSON.stringify(v.errors));
+  const tl = buildTimeline(v.model, "B", RULES, { asOf: AS_OF });
+  const y = evaluateAt(tl, 5, "tax", parseMonth("2027-04"), RULES).years.slice(-1)[0];
+  eq(Math.round(y.total), 51000, "2026/27 includes the bonus once");
+  eq(Math.round(tl.annual[parseMonth("2027-01") - tl.start]), 48000, "salary rate unchanged in the bonus month");
+});
+test("BO-03 explanation says a year passes only because of the bonus", () => {
+  const a = run(bonusCase(JAN_BONUSES), "B");
+  const res = a.results[5].tax;
+  const lines = explain(a.timeline, res, evaluateAt(a.timeline, 5, "tax", res.earliest, RULES), RULES);
+  ok(lines.some((l) => l === "2026/27 passes only because of the one-off payment of £3,000 in January 2027."), lines.join(" | "));
+});
+test("BO-04 a too-small bonus is named in the shortfall", () => {
+  const a = run(bonusCase([{ month: "2027-01", amount: 1000 }]), "B");
+  const ev = evaluateAt(a.timeline, 5, "tax", parseMonth("2027-04"), RULES);
+  const y = ev.years.slice(-1)[0];
+  ok(/That includes the one-off payment of £1,000 in January 2027\.$/.test(explainYear(a.timeline, y, ev.threshold, "tax")),
+    explainYear(a.timeline, y, ev.threshold, "tax"));
+});
+test("BO-05 bonus validation", () => {
+  const v = validate(bonusCase([{ month: "2026-01", amount: 5000 }, { month: "2027-02", amount: "" }, { month: "", amount: "0" }]),
+    RULES, { asOf: AS_OF });
+  ok(/past/.test(v.errors["scenarios.B.bonuses.0.month"] || ""), "past month");
+  ok(v.errors["scenarios.B.bonuses.1.amount"], "missing amount");
+  ok(v.errors["scenarios.B.bonuses.2.month"] && /above £0/.test(v.errors["scenarios.B.bonuses.2.amount"]), "missing month, zero amount");
+});
+test("BO-06 HMRC mode: bonus must be after the HMRC figures, and counts on top", () => {
+  const raw = hmrcFor("2021-10", HM01.hmrc);
+  raw.scenarios.B.bonuses = [{ month: "2026-10", amount: 5000 }];
+  const bad = validate(raw, RULES, { asOf: parseMonth("2026-10") });
+  ok(/already in your HMRC totals/.test(bad.errors["scenarios.B.bonuses.0.month"] || ""), JSON.stringify(bad.errors));
+  raw.scenarios.B.bonuses = [{ month: "2027-02", amount: 5000 }];
+  const a = run(raw, "B");
+  const y = evaluateAt(a.timeline, 5, "tax", parseMonth("2027-04"), RULES).years.slice(-1)[0];
+  eq(Math.round(y.total), 59000, "2026/27 = £54,000 + £5,000 bonus");
+});
+test("BO-07 bonuses are ignored when the scenario keeps current salary", () => {
+  const raw = bonusCase(JAN_BONUSES);
+  raw.scenarios.B.mode = "keep";
+  eq(run(raw, "B").results[5].tax.earliest, null, "keep mode");
 });
 
 function runTests() {

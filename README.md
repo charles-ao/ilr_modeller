@@ -8,6 +8,8 @@ Past earnings can be entered in two ways:
 - **Salary periods:** each pay change and its month.
 - **HMRC tax-year totals:** a part-year figure from the route start to 5 April, one total for each complete tax year, a year-to-date figure and your current salary. In this mode, tax-year results are exact, and calendar-year and rolling results are estimates.
 
+Future plans can include salary changes, yearly growth and one-off payments such as a bonus. A one-off payment counts in full in the month it's paid.
+
 The full specification is in [REQUIREMENTS.md](REQUIREMENTS.md).
 
 ## Files
