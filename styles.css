@@ -327,12 +327,6 @@ select { padding-right: 32px; }
 .prose ul { padding-left: 1.2em; }
 .prose li { margin-bottom: 0.4em; }
 .prose .table-scroll { margin-bottom: 20px; max-width: 760px; }
-.checklist { list-style: none; padding-left: 0 !important; }
-.checklist li { padding-left: 30px; position: relative; }
-.checklist li::before {
-  content: ""; position: absolute; left: 0; top: 4px; width: 18px; height: 18px;
-  border: 2px solid var(--primary); border-radius: 4px; background: var(--white);
-}
 
 .diagram { margin: 12px 0 24px; max-width: 760px; }
 .diagram-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; }
