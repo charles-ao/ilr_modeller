@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Engine Tests</title>
+  <style>
+    :root { --navy: #0A2A66; --primary: #1F5FD1; --sky: #5B8DEF; --mist: #E8F0FE; --line: #C9D8F5; --ink: #14213D; --muted: #4A5878; }
+    body { margin: 0; padding: 16px; background: #FFFFFF; color: var(--ink); font: 16px/1.5 "IBM Plex Sans", system-ui, sans-serif; }
+    h1 { color: var(--navy); font-size: 1.5rem; }
+    .summary { padding: 12px 16px; border-left: 6px solid var(--navy); background: var(--mist); font-weight: 600; }
+    ol { padding-left: 1.4em; }
+    li { padding: 4px 0; border-bottom: 1px solid var(--line); }
+    .pass::before { content: "✓ PASS  "; color: var(--primary); font-weight: 700; }
+    .fail::before { content: "✗ FAIL  "; color: var(--navy); font-weight: 700; }
+    .fail { background: var(--mist); }
+    .err { display: block; color: var(--muted); font-family: ui-monospace, monospace; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>ILR modeller: engine tests</h1>
+  <p>Acceptance tests from REQUIREMENTS.md section 12, plus unit checks. These run in this browser.</p>
+  <p class="summary" id="summary" role="status">Running…</p>
+  <ol id="list"></ol>
+  <script src="../config.js"></script>
+  <script src="../engine.js"></script>
+  <script src="engine.test.js"></script>
+  <script>
+    const results = window.ILRTests.runTests();
+    const failed = results.filter((r) => !r.pass).length;
+    document.getElementById("summary").textContent = `${results.length - failed} passed, ${failed} failed`;
+    document.getElementById("list").innerHTML = results.map((r) =>
+      `<li class="${r.pass ? "pass" : "fail"}">${r.name.replace(/</g, "&lt;")}${r.pass ? "" : `<span class="err">${r.error.replace(/</g, "&lt;")}</span>`}</li>`
+    ).join("");
+  </script>
+</body>
+</html>

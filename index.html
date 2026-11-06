@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="See when you could qualify for indefinite leave to remain on the 3, 5 and 10-year earned settlement routes, comparing tax-year, calendar-year and rolling 12-month counting.">
+  <title>ILR Settlement Modeller</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230A2A66'/%3E%3Cpath d='M8 22h16M10 18v-6m6 6v-9m6 9v-4' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <!-- Plain scripts (not ES modules) so the page also works when opened straight from disk. -->
+  <script src="config.js" defer></script>
+  <script src="engine.js" defer></script>
+  <script src="ui.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#results-heading">Skip to results</a>
+
+  <header class="masthead">
+    <div class="wrap">
+      <p class="eyebrow">Earned settlement · illustrative planner</p>
+      <h1>When could I get indefinite leave to remain?</h1>
+      <p class="lede">Enter your UK salary history and plans. See your earliest ILR date on the 3, 5 and 10-year routes under three ways of counting a year.</p>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <aside class="notice" role="note" aria-labelledby="notice-title">
+      <p id="notice-title" class="notice-title">Announced policy, not yet law</p>
+      <p>Earned settlement was announced in the government's consultation response <span data-config="source"></span>. It is not yet in the Immigration Rules, and the final rules may change. This tool is illustrative and is <strong>not immigration advice</strong>. Before you make decisions, speak to an <a href="https://www.gov.uk/find-an-immigration-adviser" rel="noopener" target="_blank">OISC-regulated adviser</a> or an immigration solicitor.</p>
+      <p class="notice-small">Everything you type stays in this browser. Nothing is sent anywhere.</p>
+    </aside>
+  </div>
+
+  <main class="wrap layout" id="main">
+    <!-- ============================== INPUTS ============================== -->
+    <section class="inputs no-print" aria-labelledby="inputs-heading">
+      <h2 id="inputs-heading">Your details</h2>
+
+      <div class="card preset">
+        <label for="preset" class="label">New here? Try an example</label>
+        <div class="inline">
+          <select id="preset">
+            <option value="">Choose an example…</option>
+            <option value="raise">Mid-year raise (£45,000 to £54,000)</option>
+            <option value="cut">Recent pay cut</option>
+            <option value="promotion">Promotion to over £125,000</option>
+            <option value="steady">Steady salary (£38,000)</option>
+          </select>
+          <button type="button" class="btn btn-secondary" id="load-preset">Load</button>
+        </div>
+      </div>
+
+      <form id="form" novalidate autocomplete="off">
+        <fieldset class="card">
+          <legend><span class="step">1</span> Route start</legend>
+          <div class="field">
+            <label for="routeStart" class="label">Month your qualifying period started</label>
+            <p class="help" id="routeStart-help">The month you started on a route that counts towards settlement, such as Skilled Worker. Time on Student, Graduate and other temporary routes doesn't count.</p>
+            <input class="input month" id="routeStart" data-path="routeStart" data-touch="routeStart" aria-describedby="routeStart-help routeStart-err">
+            <p class="field-error" id="routeStart-err" hidden></p>
+          </div>
+        </fieldset>
+
+        <fieldset class="card">
+          <legend><span class="step">2</span> Salary history</legend>
+          <p class="help" id="history-help">Add a row for each time your pay changed, from your route start to today. Salary means your annual <strong>taxable</strong> pay, after salary sacrifice such as pension contributions.</p>
+          <ol class="rows" id="history-rows" aria-describedby="history-help"></ol>
+          <p class="field-error" id="history-err" hidden></p>
+          <div class="inline wrap-row">
+            <button type="button" class="btn btn-secondary" data-action="add-history">+ Add salary change</button>
+            <button type="button" class="btn btn-secondary" data-action="add-gap">+ Add gap</button>
+          </div>
+          <p class="help">Use “Add gap” for an unpaid period, such as a career break. It adds a £0 row; add another row for when pay resumed.</p>
+        </fieldset>
+
+        <fieldset class="card">
+          <legend><span class="step">3</span> Your plan</legend>
+          <p class="help">Compare two plans that share the same history. For example, A stays put and B takes a new job.</p>
+          <div class="segmented" role="group" aria-label="Scenario to edit" id="plan-switch"></div>
+          <div id="plan-editor"></div>
+        </fieldset>
+
+        <fieldset class="card">
+          <legend><span class="step">4</span> Check a month <span class="optional">(optional)</span></legend>
+          <div class="field">
+            <label for="applyIn" class="label">I plan to apply in</label>
+            <p class="help" id="applyIn-help">See whether each route would be met if you applied in a particular month.</p>
+            <input class="input month" id="applyIn" data-path="applyIn" data-touch="applyIn" aria-describedby="applyIn-help applyIn-err">
+            <p class="field-error" id="applyIn-err" hidden></p>
+          </div>
+        </fieldset>
+      </form>
+
+      <section class="card" aria-labelledby="save-heading">
+        <h3 id="save-heading" class="card-title">Save and share</h3>
+        <div class="field">
+          <label for="save-name" class="label">Scenario name</label>
+          <div class="inline">
+            <input class="input" id="save-name" placeholder="For example, Stay put vs new job" maxlength="60">
+            <button type="button" class="btn btn-secondary" id="save-btn">Save</button>
+          </div>
+          <p class="help">Saved scenarios are kept only in this browser.</p>
+        </div>
+        <ul class="saved-list" id="saved-list"></ul>
+        <div class="inline wrap-row">
+          <button type="button" class="btn btn-secondary" id="copy-link">Copy link</button>
+          <button type="button" class="btn btn-secondary" id="export-csv">Export CSV</button>
+          <button type="button" class="btn btn-secondary" id="print-btn">Print</button>
+          <button type="button" class="btn btn-quiet" id="clear-all">Clear all</button>
+        </div>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+      </section>
+    </section>
+
+    <!-- ============================== RESULTS ============================== -->
+    <section class="results" aria-labelledby="results-heading">
+      <h2 id="results-heading" tabindex="-1">Your results</h2>
+      <div id="results"></div>
+    </section>
+  </main>
+
+  <!-- ============================== HOW WE COUNT ============================== -->
+  <section class="wrap prose" id="how" aria-labelledby="how-heading">
+    <h2 id="how-heading">How we count</h2>
+    <p>Each route needs a minimum time on your route <em>and</em> enough years at or above an earnings threshold. For example, the 5-year route needs 3 of the 5 years before you apply to reach £50,271. The government hasn't said what a “year” means. This tool counts it three ways and shows them side by side.</p>
+
+    <div class="table-scroll">
+      <table class="table">
+        <caption class="sr-only">Earnings test for each route</caption>
+        <thead><tr><th scope="col">Route</th><th scope="col">Earnings threshold a year</th><th scope="col">Years it must be met</th><th scope="col">Linked tax band</th></tr></thead>
+        <tbody id="rules-table"></tbody>
+      </table>
+    </div>
+
+    <h3>Three ways to count a year</h3>
+    <div class="table-scroll">
+      <table class="table">
+        <thead><tr><th scope="col">Basis</th><th scope="col">A “year” is</th><th scope="col">Years counted before applying</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Tax year</th><td>6 April to 5 April</td><td>The most recent complete tax years ending before the application date</td></tr>
+          <tr><th scope="row">Calendar year</th><td>1 January to 31 December</td><td>The most recent complete calendar years ending before the application date</td></tr>
+          <tr><th scope="row">Rolling 12 months</th><td>Any 12 consecutive months</td><td>Back-to-back 12-month blocks, counted back from the day before the application date</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <figure class="diagram">
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 640 236" role="img" aria-labelledby="dg-title dg-desc" class="count-diagram">
+          <title id="dg-title">Which years count when applying in November 2026</title>
+          <desc id="dg-desc">Tax year: 2024/25 and 2025/26 are complete and count; 2026/27 is incomplete and doesn't count. Calendar year: 2024 and 2025 count; 2026 is incomplete. Rolling: November 2024 to October 2025 and November 2025 to October 2026 both count.</desc>
+          <g class="dg-grid">
+            <line x1="182" y1="44" x2="182" y2="214"/><line x1="398" y1="44" x2="398" y2="214"/><line x1="614" y1="44" x2="614" y2="214"/>
+          </g>
+          <g class="dg-axis">
+            <text x="182" y="38" text-anchor="middle">Jan 2025</text>
+            <text x="398" y="38" text-anchor="middle">Jan 2026</text>
+            <text x="614" y="38" text-anchor="end">Jan 2027</text>
+          </g>
+          <g class="dg-lane-labels">
+            <text x="0" y="84">Tax year</text>
+            <text x="0" y="138">Calendar year</text>
+            <text x="0" y="192">Rolling 12m</text>
+          </g>
+          <!-- Tax year lane -->
+          <rect class="dg-count" x="112" y="66" width="122" height="28" rx="3"/>
+          <text class="dg-in" x="173" y="85" text-anchor="middle">24/25</text>
+          <rect class="dg-count" x="238" y="66" width="212" height="28" rx="3"/>
+          <text class="dg-in" x="344" y="85" text-anchor="middle">TY 25/26</text>
+          <rect class="dg-skip" x="454" y="66" width="122" height="28" rx="3"/>
+          <text class="dg-out" x="515" y="85" text-anchor="middle">26/27 incomplete</text>
+          <!-- Calendar lane -->
+          <rect class="dg-count" x="112" y="120" width="68" height="28" rx="3"/>
+          <text class="dg-in" x="146" y="139" text-anchor="middle">2024</text>
+          <rect class="dg-count" x="184" y="120" width="212" height="28" rx="3"/>
+          <text class="dg-in" x="290" y="139" text-anchor="middle">2025</text>
+          <rect class="dg-skip" x="400" y="120" width="176" height="28" rx="3"/>
+          <text class="dg-out" x="488" y="139" text-anchor="middle">2026 incomplete</text>
+          <!-- Rolling lane -->
+          <rect class="dg-count" x="148" y="174" width="212" height="28" rx="3"/>
+          <text class="dg-in" x="254" y="193" text-anchor="middle">Nov 24 – Oct 25</text>
+          <rect class="dg-count" x="364" y="174" width="212" height="28" rx="3"/>
+          <text class="dg-in" x="470" y="193" text-anchor="middle">Nov 25 – Oct 26</text>
+          <!-- Application date -->
+          <line class="dg-apply" x1="578" y1="22" x2="578" y2="222"/>
+          <text class="dg-apply-label" x="574" y="16" text-anchor="end">Apply Nov 2026 ▼</text>
+        </svg>
+      </div>
+      <figcaption>
+        <span class="key key-count" aria-hidden="true"></span> Complete years that count
+        <span class="key key-skip" aria-hidden="true"></span> Incomplete at the application date, so they don't count.
+        The example applies in November 2026 and shows the two most recent years only.
+      </figcaption>
+    </figure>
+
+    <h3>The calculation</h3>
+    <ul>
+      <li>Each month earns one twelfth of the annual salary in force that month. Months before your route start earn £0.</li>
+      <li>An application date is the first day of a month. For each route and way of counting, the tool steps forward month by month from the earliest point you could have enough time on route. It stops at the first month that also passes the earnings test.</li>
+      <li>On the tax-year basis, pay is allocated April to March, and dates are shown as 6 April.</li>
+      <li>Years that haven't finished by the application date are ignored.</li>
+      <li>Results run to <span data-config="horizon"></span> years after your route start. A route not met by then shows “Not reached”.</li>
+      <li>If a later pay cut means the test stops being met, the tool shows the date eligibility lapses.</li>
+    </ul>
+  </section>
+
+  <!-- ============================== CHECKLIST ============================== -->
+  <section class="wrap prose" id="checklist" aria-labelledby="checklist-heading">
+    <h2 id="checklist-heading">What this tool doesn't check</h2>
+    <p>The tool models only the earnings test and time on route. Under the announced rules, you'd also need to meet every one of these:</p>
+    <ul class="checklist">
+      <li><strong>English at B2</strong> (higher than today's B1), unless you're exempt.</li>
+      <li><strong>Life in the UK test</strong> passed.</li>
+      <li><strong>No criminal record</strong> as an adult. This includes cautions, fines and community sentences.</li>
+      <li><strong>No outstanding government debt</strong>, including NHS charges, unpaid tax and National Insurance.</li>
+      <li><strong>No public funds</strong> in the 5 years before applying. Otherwise you're on the 20-year route.</li>
+      <li><strong>No immigration breaches</strong> as an adult, such as overstaying or breaching visa conditions. Otherwise you're on the 20-year route.</li>
+      <li><strong>An eligible route.</strong> Only Skilled Worker, Global Talent, Scale-up, Innovator Founder and International Sportsperson can use the 3 or 5-year earnings routes.</li>
+      <li><strong>Unbroken residence</strong> and the absence limits for your route.</li>
+    </ul>
+    <p>Some people can reach 5 years in other ways, which this tool doesn't model:</p>
+    <ul>
+      <li>Eligible health and education jobs on national pay scales.</li>
+      <li>Partners, parents and children of British citizens.</li>
+      <li>UK Ancestry.</li>
+      <li>Transitional arrangements for care workers and some public-service workers who were on their route before May 2025.</li>
+    </ul>
+    <p>Couples can combine earnings against a <span data-config="household"></span> household threshold. That isn't modelled either.</p>
+  </section>
+
+  <footer class="footer">
+    <div class="wrap">
+      <p><strong>Rules last checked:</strong> <span data-config="lastChecked"></span>. Source: <span data-config="source"></span>.</p>
+      <ul class="footer-links" id="sources"></ul>
+      <p class="footer-small">Illustrative only. Not immigration advice. Thresholds are held in <code>config.js</code> and will need updating when the final Immigration Rules are published.</p>
+    </div>
+  </footer>
+
+  <noscript><p class="wrap notice">This tool needs JavaScript to calculate your results.</p></noscript>
+</body>
+</html>
