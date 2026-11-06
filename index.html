@@ -49,6 +49,7 @@
             <option value="cut">Recent pay cut</option>
             <option value="promotion">Promotion to over £125,000</option>
             <option value="steady">Steady salary (£38,000)</option>
+            <option value="hmrc">HMRC tax-year totals</option>
           </select>
           <button type="button" class="btn btn-secondary" id="load-preset">Load</button>
         </div>
@@ -66,15 +67,25 @@
         </fieldset>
 
         <fieldset class="card">
-          <legend><span class="step">2</span> Salary history</legend>
-          <p class="help" id="history-help">Add a row for each time your pay changed, from your route start to today. Salary means your annual <strong>taxable</strong> pay, after salary sacrifice such as pension contributions.</p>
-          <ol class="rows" id="history-rows" aria-describedby="history-help"></ol>
-          <p class="field-error" id="history-err" hidden></p>
-          <div class="inline wrap-row">
-            <button type="button" class="btn btn-secondary" data-action="add-history">+ Add salary change</button>
-            <button type="button" class="btn btn-secondary" data-action="add-gap">+ Add gap</button>
+          <legend><span class="step">2</span> Past earnings</legend>
+          <fieldset class="radio-group">
+            <legend class="label">How do you want to enter them?</legend>
+            <label class="radio"><input type="radio" name="source" value="periods" checked><span>Salary periods <span class="optional">(each pay change and its month)</span></span></label>
+            <label class="radio"><input type="radio" name="source" value="hmrc"><span>HMRC tax-year totals <span class="optional">(from your HMRC account or P60s)</span></span></label>
+          </fieldset>
+
+          <div id="periods-editor">
+            <p class="help" id="history-help">Add a row for each time your pay changed, from your route start to today. Salary means your annual <strong>taxable</strong> pay, after salary sacrifice such as pension contributions.</p>
+            <ol class="rows" id="history-rows" aria-describedby="history-help"></ol>
+            <p class="field-error" id="history-err" hidden></p>
+            <div class="inline wrap-row">
+              <button type="button" class="btn btn-secondary" data-action="add-history">+ Add salary change</button>
+              <button type="button" class="btn btn-secondary" data-action="add-gap">+ Add gap</button>
+            </div>
+            <p class="help">Use “Add gap” for an unpaid period, such as a career break. It adds a £0 row; add another row for when pay resumed.</p>
           </div>
-          <p class="help">Use “Add gap” for an unpaid period, such as a career break. It adds a £0 row; add another row for when pay resumed.</p>
+
+          <div id="hmrc-editor" hidden></div>
         </fieldset>
 
         <fieldset class="card">
@@ -202,6 +213,7 @@
       <li>Each month earns one twelfth of the annual salary in force that month. Months before your route start earn £0.</li>
       <li>An application date is the first day of a month. For each route and way of counting, the tool steps forward month by month from the earliest point you could have enough time on route. It stops at the first month that also passes the earnings test.</li>
       <li>On the tax-year basis, pay is allocated April to March, and dates are shown as 6 April.</li>
+      <li>If you enter HMRC tax-year totals, each total is spread evenly across the months it covers. For the first tax year, that's from your route start to 5 April. Tax-year results use your figures exactly. Calendar-year and rolling results are estimates, because a tax-year total doesn't show when in the year you were paid.</li>
       <li>Years that haven't finished by the application date are ignored.</li>
       <li>Results run to <span data-config="horizon"></span> years after your route start. A route not met by then shows “Not reached”.</li>
       <li>If a later pay cut means the test stops being met, the tool shows the date eligibility lapses.</li>

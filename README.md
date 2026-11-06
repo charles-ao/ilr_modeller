@@ -4,6 +4,10 @@ A static page that shows when someone could qualify for indefinite leave to rema
 
 It is illustrative only and is not immigration advice. The rules come from the government's consultation response *A Fairer Pathway to Settlement* (CP 1707, November 2026). They are announced policy, not yet Immigration Rules.
 
+Past earnings can be entered in two ways:
+- **Salary periods:** each pay change and its month.
+- **HMRC tax-year totals:** a part-year figure from the route start to 5 April, one total for each complete tax year, a year-to-date figure and your current salary. In this mode, tax-year results are exact, and calendar-year and rolling results are estimates.
+
 The full specification is in [REQUIREMENTS.md](REQUIREMENTS.md).
 
 ## Files

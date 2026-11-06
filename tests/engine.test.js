@@ -10,7 +10,7 @@ const RULES = isNode ? require("../config.js").RULES : root.ILR_RULES;
 const {
   validate, analyseScenario, buildTimeline, evaluateAt, countedYears, explain,
   parseMonth, formatMonth, formatDate, formatGBP, parseSalary, encodeState, decodeState,
-  toCSV, BASES
+  toCSV, BASES, hmrcRows, proRata, annualise
 } = isNode ? require("../engine.js") : root.ILREngine;
 
 const AS_OF = parseMonth("2026-11");
@@ -183,6 +183,108 @@ test("CE-06: one full scenario analysis takes under 100 ms", () => {
   for (let i = 0; i < 10; i++) run(raw, "A");
   const per = ((globalThis.performance || Date).now() - t0) / 10;
   ok(per < 100, `took ${per.toFixed(1)} ms`);
+});
+
+// ---------------------------------------------------------------------------
+// HMRC tax-year totals mode
+
+function hmrcFor(routeStart, hmrc, extra = {}) {
+  return {
+    version: 2, source: "hmrc", routeStart, history: [], hmrc,
+    scenarios: { A: { label: "Keep", mode: "keep" }, B: { label: "Projected", mode: "projected", changes: [], growthPct: 0 } },
+    applyIn: null, ...extra
+  };
+}
+
+// AT-01 entered as HMRC figures (as of November 2026):
+// part-year Oct 2021–Mar 2022 = 6 x £3,750; 2023/24 = £49,500; YTD Apr–Oct 2026 = 7 x £4,500.
+const HM01 = hmrcFor("2021-10", {
+  firstPart: 22500,
+  years: { 2022: 45000, 2023: 49500, 2024: 54000, 2025: 54000 },
+  ytd: 31500, ytdTo: "2026-10", currentSalary: 54000
+});
+
+test("HM-01 AT-01 as HMRC totals: 5-year tax basis is exact (Apr 2027)", () => {
+  const r = run(HM01).results[5];
+  eq(short(r.tax.earliest), "Apr 2027", "tax");
+  eq(short(r.calendar.earliest), "Jan 2027", "calendar (estimate)");
+  eq(short(r.rolling.earliest), "Oct 2026", "rolling (estimate)");
+});
+test("HM-01 tax years match the HMRC totals exactly", () => {
+  const a = run(HM01);
+  const years = evaluateAt(a.timeline, 5, "tax", parseMonth("2027-04"), RULES).years;
+  eq(Math.round(years.find((y) => y.label === "2023/24").total), 49500, "2023/24");
+  eq(Math.round(years.find((y) => y.label === "2026/27").total), 54000, "2026/27 = YTD + 5 months at £54,000");
+});
+test("HM-01 10-year route Oct 2031 on every basis", () => {
+  const r = run(HM01).results[10];
+  for (const b of BASES) eq(short(r[b].earliest), "Oct 2031", b);
+});
+test("HM-02 AT-04 as HMRC totals: part-year Feb–Mar 2024, 3-year tax basis Apr 2027", () => {
+  const a = run(hmrcFor("2024-02", {
+    firstPart: 130000 * 2 / 12, years: { 2024: 130000, 2025: 130000 },
+    ytd: 130000 * 7 / 12, ytdTo: "2026-10", currentSalary: 130000
+  }));
+  eq(short(a.results[3].tax.earliest), "Apr 2027", "tax");
+  eq(short(a.results[3].calendar.earliest), "Jan 2028", "calendar");
+  eq(short(a.results[3].rolling.earliest), "Feb 2027", "rolling");
+});
+test("HMRC part-year only counts from the route start", () => {
+  const a = run(HM01);
+  const y = evaluateAt(a.timeline, 10, "tax", parseMonth("2023-04"), RULES).years.find((x) => x.label === "2021/22");
+  eq(Math.round(y.total), 22500, "2021/22 total");
+  eq(y.monthsBeforeStart, 6, "months before start");
+});
+test("HMRC rows: part-year, full years and current year", () => {
+  const rows = hmrcRows(parseMonth("2021-10"), AS_OF, RULES);
+  eq(rows.partYear.label, "2021/22", "part-year");
+  eq(rows.partYear.months, 6, "months on route");
+  eq(rows.fullYears.map((y) => y.label).join(","), "2022/23,2023/24,2024/25,2025/26", "full years");
+  eq(rows.current.label, "2026/27", "current");
+  const late = hmrcRows(parseMonth("2026-06"), AS_OF, RULES);
+  eq(late.partYear, null, "no part-year when the route starts this tax year");
+  eq(formatMonth(late.current.start), "June 2026", "current year starts at the route start");
+});
+test("HMRC with no year-to-date figure: current salary from the start of the tax year", () => {
+  const raw = hmrcFor("2021-10", { ...HM01.hmrc, ytd: "", ytdTo: "" });
+  const v = validate(raw, RULES, { asOf: AS_OF });
+  ok(v.ok, JSON.stringify(v.errors));
+  eq(formatMonth(v.model.projStart), "April 2026", "projection start");
+});
+test("HMRC validation messages", () => {
+  const v = validate(hmrcFor("2021-10", { firstPart: "", years: { 2022: 45000, 2023: "-1" }, ytd: "1000", ytdTo: "2025-12", currentSalary: "" }),
+    RULES, { asOf: AS_OF });
+  eq(v.ok, false, "ok");
+  ok(/to 5 April 2022/.test(v.errors["hmrc.firstPart"]), "part-year missing");
+  ok(/negative/.test(v.errors["hmrc.years.2023"]), "negative year");
+  ok(/2024\/25/.test(v.errors["hmrc.years.2024"]), "missing year");
+  ok(/2026\/27 tax year/.test(v.errors["hmrc.ytdTo"]), "YTD month outside current tax year");
+  ok(v.errors["hmrc.currentSalary"], "current salary missing");
+  eq(v.errors.history, undefined, "salary periods not required in HMRC mode");
+});
+test("HMRC projected changes must start after the HMRC figures end", () => {
+  const raw = hmrcFor("2021-10", HM01.hmrc);
+  raw.scenarios.B.changes = [{ from: "2026-10", salary: 60000 }];
+  const v = validate(raw, RULES, { asOf: parseMonth("2026-10") });
+  ok(/after your HMRC figures end \(October 2026\)/.test(v.errors["scenarios.B.changes.0.from"] || ""), JSON.stringify(v.errors));
+});
+test("HMRC explanation names the HMRC figures, and calendar/rolling as estimates", () => {
+  const a = run(HM01);
+  const res = a.results[5].calendar;
+  const lines = explain(a.timeline, res, evaluateAt(a.timeline, 5, "calendar", res.earliest, RULES), RULES);
+  ok(lines.some((l) => /based on your HMRC figures/.test(l) && /estimate/.test(l)), lines.join(" | "));
+  const tax = a.results[5].tax;
+  const tl = explain(a.timeline, tax, evaluateAt(a.timeline, 5, "tax", tax.earliest, RULES), RULES);
+  ok(tl.some((l) => l.startsWith("2023/24 falls £771 short, based on your HMRC figures.")), tl.join(" | "));
+});
+test("HMRC helpers: pro-rata and annualised year to date", () => {
+  eq(proRata(45000, 6), 22500, "pro-rata");
+  eq(annualise(31500, parseMonth("2026-04"), parseMonth("2026-10")), 54000, "annualise");
+});
+test("HMRC CSV marks calendar and rolling as estimates", () => {
+  const csv = toCSV([run(HM01)], { A: "Keep" }, RULES);
+  ok(csv.includes("Keep,5-year,Calendar year (estimate),January 2027"), csv);
+  ok(csv.includes("Keep,5-year,Tax year,6 April 2027"), csv);
 });
 
 function runTests() {

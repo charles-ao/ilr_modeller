@@ -188,6 +188,19 @@ select { padding-right: 32px; }
 }
 .badge-current { background: var(--navy); color: var(--white); border-color: var(--navy); }
 
+/* HMRC tax-year totals editor */
+.hm-block { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 12px; }
+.hm-title { font-size: 1rem; margin: 0 0 4px; }
+.hm-block .field { margin: 8px 0; }
+.hm-helper { background: var(--mist); border-radius: var(--radius); padding: 8px 12px; margin: 8px 0; }
+.hm-helper summary { cursor: pointer; color: var(--primary); font-weight: 600; min-height: 32px; display: flex; align-items: center; }
+.hm-helper .help:last-child { margin: 8px 0 0; }
+.estimate-note {
+  background: var(--mist); border-left: 4px solid var(--sky); border-radius: var(--radius);
+  padding: 10px 12px; font-size: 0.92rem; margin: 14px 0 4px;
+}
+.hm-empty { border: 2px dashed var(--line); border-radius: var(--radius); padding: 12px; }
+
 .saved-list { list-style: none; padding: 0; margin: 0 0 12px; }
 .saved-list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
 .saved-list li span { flex: 1 1 auto; overflow-wrap: anywhere; }

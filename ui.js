@@ -8,7 +8,8 @@ const RULES = window.ILR_RULES;
 const {
   BASES, BASIS_LABELS, BASIS_NOUN, validate, analyseScenario, evaluateAt, explain,
   parseMonth, toMonthString, formatMonth, formatDate, formatGBP, parseSalary,
-  monthIndex, yearOf, monthOf, encodeState, decodeState, toCSV
+  monthIndex, yearOf, monthOf, encodeState, decodeState, toCSV,
+  hmrcRows, taxYearOf, proRata, annualise
 } = window.ILREngine;
 
 const ROUTES = Object.keys(RULES.routes).map(Number).sort((a, b) => a - b);
@@ -26,6 +27,9 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fd = (m, basis) => formatDate(m, basis, RULES);
+// In HMRC mode, calendar and rolling results come from tax-year totals spread evenly, so they are estimates.
+const isEst = (b) => ui.last?.model?.source === "hmrc" && b !== "tax";
+const basisLabel = (b) => BASIS_LABELS[b] + (isEst(b) ? " (estimate)" : "");
 
 // ---------------------------------------------------------------------------
 // Storage (wrapped: private windows and blocked storage must not break the page)
@@ -49,8 +53,14 @@ const blankScenarios = () => ({
   A: { label: "Keep current salary", mode: "keep", changes: [], growthPct: "" },
   B: { label: "With projected changes", mode: "projected", changes: [], growthPct: "" }
 });
+const blankHMRC = () => ({
+  firstPart: "", firstFull: "", years: {}, ytd: "", ytdTo: "", currentSalary: "", currentSalaryAuto: true
+});
 const emptyState = () => ({
-  version: 1, routeStart: "", history: [{ id: newId(), from: "", salary: "" }], scenarios: blankScenarios(), applyIn: ""
+  version: 2, routeStart: "", source: "periods",
+  history: [{ id: newId(), from: "", salary: "" }],
+  hmrc: blankHMRC(),
+  scenarios: blankScenarios(), applyIn: ""
 });
 
 const str = (v) => (v === null || v === undefined ? "" : String(v));
@@ -65,6 +75,17 @@ function fromRaw(obj) {
   s.applyIn = monthStr(obj.applyIn);
   const hist = Array.isArray(obj.history) ? obj.history.slice(0, 120) : [];
   if (hist.length) s.history = hist.map((h) => ({ id: newId(), from: monthStr(h?.from), salary: salaryStr(h?.salary) }));
+  s.source = obj.source === "hmrc" ? "hmrc" : "periods";
+  const h = obj.hmrc && typeof obj.hmrc === "object" ? obj.hmrc : {};
+  const years = {};
+  for (const [ty, v] of Object.entries(h.years && typeof h.years === "object" ? h.years : {})) {
+    if (/^\d{4}$/.test(ty)) years[ty] = salaryStr(v);
+  }
+  s.hmrc = {
+    firstPart: salaryStr(h.firstPart), firstFull: salaryStr(h.firstFull), years,
+    ytd: salaryStr(h.ytd), ytdTo: monthStr(h.ytdTo), currentSalary: salaryStr(h.currentSalary),
+    currentSalaryAuto: h.currentSalaryAuto === undefined ? !str(h.currentSalary) : Boolean(h.currentSalaryAuto)
+  };
   for (const k of KEYS) {
     const sc = obj.scenarios?.[k];
     if (!sc || typeof sc !== "object") continue;
@@ -94,9 +115,15 @@ function toRaw(s) {
       growthPct: g === "" ? 0 : (Number.isFinite(Number(g)) ? Number(g) : g)
     };
   }
+  const h = s.hmrc;
   return {
-    version: 1, routeStart: s.routeStart,
-    history: s.history.map((h) => ({ from: h.from, salary: num(h.salary) })),
+    version: 2, routeStart: s.routeStart, source: s.source,
+    history: s.history.map((r) => ({ from: r.from, salary: num(r.salary) })),
+    hmrc: {
+      firstPart: num(h.firstPart), firstFull: num(h.firstFull),
+      years: Object.fromEntries(Object.entries(h.years).map(([ty, v]) => [ty, num(v)])),
+      ytd: num(h.ytd), ytdTo: h.ytdTo, currentSalary: num(h.currentSalary), currentSalaryAuto: h.currentSalaryAuto
+    },
     scenarios, applyIn: s.applyIn || null
   };
 }
@@ -141,7 +168,27 @@ const PRESETS = {
       A: { label: "Stay on £38,000", mode: "keep" },
       B: { label: "Promotion to £52,000", mode: "projected", changes: [{ from: plus(2), salary: 52000 }], growthPct: 0 }
     }
-  })
+  }),
+  // The mid-year raise example entered as HMRC figures, placed relative to the current tax year.
+  hmrc: () => {
+    const cty = taxYearOf(AS_OF, RULES);
+    const years = { [cty - 4]: 45000, [cty - 3]: 49500, [cty - 2]: 54000, [cty - 1]: 54000 };
+    const tyStart = monthIndex(cty, RULES.taxYearStartMonth);
+    const done = AS_OF - tyStart; // complete months so far this tax year
+    return {
+      routeStart: toMonthString(monthIndex(cty - 5, 10)),
+      source: "hmrc",
+      hmrc: {
+        firstPart: 22500, firstFull: 45000, years,
+        ytd: done > 0 ? 4500 * done : "", ytdTo: done > 0 ? toMonthString(AS_OF - 1) : "",
+        currentSalary: 54000, currentSalaryAuto: true
+      },
+      scenarios: {
+        A: { label: "Stay put", mode: "keep" },
+        B: { label: "New job at £60,000", mode: "projected", changes: [{ from: plus(4), salary: 60000 }], growthPct: 0 }
+      }
+    };
+  }
 };
 
 let state = emptyState();
@@ -237,10 +284,127 @@ function renderPlan() {
     : `<p class="help">Your current salary is held flat to the end of the ${RULES.horizonYears}-year horizon.</p>`}`;
 }
 
+// ----- HMRC tax-year totals editor
+
+const hmId = (path) => `hm-${path.slice(5).replace(/\./g, "-")}`;
+let hmrcSig = null; // which tax-year rows are on screen, so they're only rebuilt when the route start changes
+
+function currentHmrcRows() {
+  const rs = parseMonth(state.routeStart);
+  return rs !== null && rs <= AS_OF ? hmrcRows(rs, AS_OF, RULES) : null;
+}
+
+function moneyField(path, label, help, value) {
+  const id = hmId(path);
+  return `<div class="field">
+    <label class="label" for="${id}">${label}</label>
+    ${help ? `<p class="help" id="${id}-help">${help}</p>` : ""}
+    <div class="money"><span aria-hidden="true">£</span><input class="input" id="${id}" inputmode="decimal" value="${esc(value)}" data-path="${path}" data-touch="${path}" data-salary aria-describedby="${help ? `${id}-help ` : ""}${id}-err"></div>
+    <p class="field-error" id="${id}-err" hidden></p>
+  </div>`;
+}
+
+function renderHMRC() {
+  const box = $("#hmrc-editor");
+  const rows = currentHmrcRows();
+  hmrcSig = rows ? state.routeStart : "none";
+  if (!rows) {
+    box.innerHTML = '<p class="help hm-empty">Enter your route start in step 1. The tax years to fill in will then appear here.</p>';
+    return;
+  }
+  const h = state.hmrc;
+  const out = [];
+  out.push(`<p class="help">Find these figures in your HMRC online account, under <a href="https://www.gov.uk/check-income-tax-last-years" rel="noopener" target="_blank">Check your Income Tax for previous years</a>, or on your P60s. Use taxable pay from employment, after salary sacrifice. If you had more than one job in a year, add them together.</p>`);
+
+  if (rows.partYear) {
+    const p = rows.partYear;
+    out.push(`<div class="hm-block">
+      <h4 class="hm-title">${p.label} <span class="optional">· part-year</span></h4>
+      ${moneyField("hmrc.firstPart", `Taxable pay from ${formatMonth(p.start)} to 5 April ${p.ty + 1}`,
+        `HMRC shows the whole of ${p.label}, but only your pay after your route start counts. Use your payslips for these ${p.months} month${p.months === 1 ? "" : "s"}.`, h.firstPart)}
+      <details class="hm-helper"${h.firstFull ? " open" : ""}>
+        <summary>Only have the full-year figure?</summary>
+        ${moneyField("hmrc.firstFull", `HMRC total for the whole of ${p.label}`, "", h.firstFull)}
+        <button type="button" class="btn btn-secondary btn-small" data-action="prorata">Estimate my part-year</button>
+        <p class="help" id="hm-prorata-msg" aria-live="polite">This takes ${p.months} twelfths of the full-year total. That assumes you were paid evenly through the year, so use your real figure if you have it.</p>
+      </details>
+    </div>`);
+  }
+
+  if (rows.fullYears.length) {
+    out.push(`<div class="hm-block"><h4 class="hm-title">Complete tax years</h4>
+      ${rows.fullYears.map((y) => moneyField(`hmrc.years.${y.ty}`,
+        `${y.label} <span class="optional">(6 April ${y.ty} to 5 April ${y.ty + 1})</span>`, "", h.years[y.ty] ?? "")).join("")}
+    </div>`);
+  }
+
+  const c = rows.current;
+  out.push(`<div class="hm-block">
+    <h4 class="hm-title">${c.label} <span class="optional">· so far</span></h4>
+    ${moneyField("hmrc.ytd", "Taxable pay so far this tax year",
+      `Your year-to-date figure from your HMRC account or latest payslip${c.start > monthIndex(c.ty, RULES.taxYearStartMonth) ? `, counting from ${formatMonth(c.start)}` : ""}. Leave blank if you don't have one yet.`, h.ytd)}
+    <div class="field">
+      <label class="label" for="hm-ytdTo">The year to date runs to the end of</label>
+      <input class="input month" id="hm-ytdTo" ${monthAttrs()} value="${esc(h.ytdTo)}" data-path="hmrc.ytdTo" data-touch="hmrc.ytdTo" aria-describedby="hm-ytdTo-err">
+      <p class="field-error" id="hm-ytdTo-err" hidden></p>
+    </div>
+  </div>`);
+
+  out.push(`<div class="hm-block">
+    ${moneyField("hmrc.currentSalary", "Current annual salary",
+      "Used from the end of your HMRC figures onwards, then your plan in step 3 takes over. We fill it in from your year-to-date figure. Change it if a bonus or pay rise makes the year to date unrepresentative.", h.currentSalary)}
+  </div>`);
+
+  out.push(`<p class="estimate-note"><strong>Calendar-year and rolling 12-month results will be estimates.</strong> HMRC gives one total for each tax year, so each total is spread evenly across its months. Tax-year results use your figures exactly.</p>`);
+  box.innerHTML = out.join("");
+}
+
+/** Keep the current salary filled in from the year-to-date figure until the user types their own. */
+function autoCurrentSalary() {
+  const h = state.hmrc;
+  if (state.source !== "hmrc" || !h.currentSalaryAuto) return;
+  const rows = currentHmrcRows();
+  if (!rows) return;
+  const ytd = parseSalary(h.ytd), to = parseMonth(h.ytdTo);
+  if (ytd === null || ytd < 0 || to === null || to < rows.current.start || to >= rows.current.end) return;
+  const value = salaryStr(Math.round(annualise(ytd, rows.current.start, to)));
+  if (value === h.currentSalary) return;
+  h.currentSalary = value;
+  const el = $("#hm-currentSalary");
+  if (el && document.activeElement !== el) el.value = value;
+}
+
+function estimatePartYear() {
+  const rows = currentHmrcRows();
+  const msg = $("#hm-prorata-msg");
+  if (!rows?.partYear) return;
+  const full = parseSalary(state.hmrc.firstFull);
+  if (full === null || full < 0) {
+    msg.textContent = "Enter the full-year total first.";
+    $("#hm-firstFull")?.focus();
+    return;
+  }
+  const m = rows.partYear.months;
+  const v = Math.round(proRata(full, m));
+  state.hmrc.firstPart = salaryStr(v);
+  $("#hm-firstPart").value = state.hmrc.firstPart;
+  ui.touched.add("hmrc.firstPart");
+  msg.textContent = `Estimated ${formatGBP(v)}: ${m} of 12 months of ${formatGBP(full)}. This assumes even pay through the year, so replace it with your real figure if you can.`;
+  update();
+}
+
+function renderSource() {
+  for (const r of $$('input[name="source"]')) r.checked = r.value === state.source;
+  $("#periods-editor").hidden = state.source !== "periods";
+  $("#hmrc-editor").hidden = state.source !== "hmrc";
+  if (state.source === "hmrc") renderHMRC();
+}
+
 function renderForm() {
   $("#routeStart").value = state.routeStart;
   $("#applyIn").value = state.applyIn;
   renderHistory();
+  renderSource();
   renderPlanSwitch();
   renderPlan();
 }
@@ -268,6 +432,12 @@ function setByPath(path, value) {
     const sc = state.scenarios[p[1]];
     if (p[2] === "changes") { if (sc.changes[+p[3]]) sc.changes[+p[3]][p[4]] = value; }
     else sc[p[2]] = value;
+  } else if (p[0] === "hmrc") {
+    if (p[1] === "years") state.hmrc.years[p[2]] = value;
+    else {
+      state.hmrc[p[1]] = value;
+      if (p[1] === "currentSalary") state.hmrc.currentSalaryAuto = String(value).trim() === "";
+    }
   }
 }
 
@@ -285,12 +455,20 @@ function elementId(path) {
   if (p[0] === "history") return `${state.history[0]?.id}-from`;
   if (p[0] === "scenarios" && p[2] === "changes") return `${state.scenarios[p[1]].changes[+p[3]]?.id}-${p[4]}`;
   if (p[0] === "scenarios" && p[2] === "growthPct") return "sc-growth";
+  if (p[0] === "hmrc") return hmId(path);
   return path;
 }
 
 function describePath(path) {
   const p = path.split(".");
   if (p[0] === "routeStart") return "Route start";
+  if (p[0] === "hmrc") {
+    if (p[1] === "firstPart") return "Part-year earnings";
+    if (p[1] === "years") return `Tax year ${p[2]}/${String((+p[2] + 1) % 100).padStart(2, "0")}`;
+    if (p[1] === "ytd") return "Year to date";
+    if (p[1] === "ytdTo") return "Year to date, month";
+    if (p[1] === "currentSalary") return "Current annual salary";
+  }
   if (p[0] === "applyIn") return "Plan to apply in";
   if (p[0] === "history") return p.length === 3 ? `Salary history, row ${+p[1] + 1}` : "Salary history";
   if (p[0] === "scenarios" && p[2] === "changes") return `Scenario ${p[1]}, change ${+p[3] + 1}`;
@@ -329,6 +507,11 @@ function goToField(path) {
 // Update cycle
 
 function update() {
+  if (state.source === "hmrc") {
+    const sig = currentHmrcRows() ? state.routeStart : "none";
+    if (sig !== hmrcSig) renderHMRC();
+    autoCurrentSalary();
+  }
   const raw = toRaw(state);
   const v = validate(raw, RULES, { asOf: AS_OF });
   showErrors(v.errors);
@@ -347,9 +530,11 @@ function renderInvalid(errors) {
   const visible = Object.entries(errors).filter(([p]) => isVisible(p));
   const out = $("#results");
   if (!visible.length) {
-    const empty = !state.routeStart && state.history.every((h) => !h.from && !h.salary);
+    const hm = state.source === "hmrc";
+    const empty = !state.routeStart && (hm || state.history.every((h) => !h.from && !h.salary));
+    const todo = hm ? "Fill in each tax year and your current annual salary." : "Every salary row needs a month and an annual salary.";
     out.innerHTML = `<div class="placeholder"><p><strong>${empty ? "Your results will appear here." : "Complete your details to see results."}</strong></p>
-      <p>${empty ? "Enter the month your route started and your salary history, or load an example." : "Every salary row needs a month and an annual salary."}</p></div>`;
+      <p>${empty ? `Enter the month your route started and your ${hm ? "HMRC figures" : "salary history"}, or load an example.` : todo}</p></div>`;
     return;
   }
   out.innerHTML = `<div class="error-summary" aria-labelledby="err-sum-h">
@@ -420,12 +605,13 @@ function headlineHTML(an) {
     sub = BASES.filter((b) => b !== o.basis).map((b) => {
       const r = h.byBasis[b];
       if (!r) return `Under a ${BASIS_NOUN[b]} basis: not reached.`;
-      return `Under a ${BASIS_NOUN[b]} basis: <strong>${fd(r.earliest, b)}</strong>${r.route !== o.route ? ` (${r.route}-year route)` : ""}.`;
+      return `Under a ${BASIS_NOUN[b]} basis${isEst(b) ? " (estimate)" : ""}: <strong>${fd(r.earliest, b)}</strong>${r.route !== o.route ? ` (${r.route}-year route)` : ""}.`;
     }).join(" ");
   }
   return `<div class="headline" aria-live="polite">
     <p class="caption">Scenario ${ui.active}: ${label}</p>
-    <p class="headline-main">Earliest ILR: <strong>${fd(o.earliest, o.basis)}</strong> (${o.route}-year route${same ? "" : `, ${BASIS_NOUN[o.basis]} basis`}).</p>
+    <p class="headline-main">Earliest ILR: <strong>${fd(o.earliest, o.basis)}</strong> (${o.route}-year route${same ? "" : `, ${BASIS_NOUN[o.basis]} basis${isEst(o.basis) ? ", estimate" : ""}`}).</p>
+    ${ui.last.model.source === "hmrc" ? '<p class="caption">Calendar-year and rolling results are estimates, because your HMRC figures are tax-year totals.</p>' : ""}
     <p class="headline-sub">${sub}</p>
   </div>`;
 }
@@ -466,7 +652,7 @@ function timelineHTML(an, model, sel, width) {
   const parts = [];
   BASES.forEach((b, bi) => {
     const top = axisH + bi * laneH;
-    parts.push(`<text class="tl-lane-title" x="0" y="${top + 15}">${BASIS_LABELS[b]}</text>`);
+    parts.push(`<text class="tl-lane-title" x="0" y="${top + 15}">${basisLabel(b)}</text>`);
     ROUTES.forEach((r, ri) => {
       const ty = top + titleH + ri * trackH + trackH / 2;
       const res = an.results[r][b];
@@ -480,7 +666,7 @@ function timelineHTML(an, model, sel, width) {
       });
       if (res.earliest !== null && res.earliest <= t1) {
         const isSel = sel.route === r && sel.basis === b;
-        const aria = `${r}-year route, ${BASIS_LABELS[b]}: earliest ${fd(res.earliest, b)}${res.lapse !== null ? `, lapses from ${fd(res.lapse, b)}` : ""}. Show breakdown.`;
+        const aria = `${r}-year route, ${basisLabel(b)}: earliest ${fd(res.earliest, b)}${res.lapse !== null ? `, lapses from ${fd(res.lapse, b)}` : ""}. Show breakdown.`;
         parts.push(`<g class="tl-marker${isSel ? " is-selected" : ""}" role="button" tabindex="0" aria-label="${esc(aria)}" data-action="select" data-route="${r}" data-basis="${b}" data-focus-key="m-${r}-${b}" transform="translate(${x(res.earliest)} ${ty})">
           <title>${esc(aria)}</title><circle class="ring" r="14"/><circle r="10"/><text text-anchor="middle" y="4">${r}</text></g>`);
       } else if (res.earliest === null) {
@@ -537,7 +723,7 @@ function gridHTML(an, sel) {
       const cls = ["cell-btn", res.earliest === null ? "is-none" : "", isBest ? "is-best" : "", isSel ? "is-selected" : ""].join(" ");
       const date = res.earliest === null ? "Not reached" : fd(res.earliest, b);
       const lapse = res.lapse !== null ? `<span class="sub">Lapses from ${fd(res.lapse, b)}</span>` : "";
-      const aria = `${r}-year route, ${BASIS_LABELS[b]}: ${date}${isBest ? ", earliest for this route" : ""}${res.lapse !== null ? `, lapses from ${fd(res.lapse, b)}` : ""}. Show breakdown.`;
+      const aria = `${r}-year route, ${basisLabel(b)}: ${date}${isBest ? ", earliest for this route" : ""}${res.lapse !== null ? `, lapses from ${fd(res.lapse, b)}` : ""}. Show breakdown.`;
       return `<td><button type="button" class="${cls}" data-action="select" data-route="${r}" data-basis="${b}" data-focus-key="c-${r}-${b}" aria-pressed="${isSel}" aria-label="${esc(aria)}">
         ${isBest ? '<span class="best-tag">Earliest</span>' : ""}<span class="date">${date}</span>${lapse}</button></td>`;
     }).join("");
@@ -548,7 +734,7 @@ function gridHTML(an, sel) {
     <div class="table-scroll">
       <table class="table grid">
         <caption class="sr-only">Earliest ILR date for each route (rows) under each way of counting a year (columns)</caption>
-        <thead><tr><th scope="col">Route</th>${BASES.map((b) => `<th scope="col">${BASIS_LABELS[b]}</th>`).join("")}</tr></thead>
+        <thead><tr><th scope="col">Route</th>${BASES.map((b) => `<th scope="col">${basisLabel(b)}</th>`).join("")}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -619,7 +805,7 @@ function breakdownHTML(an, model, sel, width) {
     </tr>`).join("");
 
   return `<div class="block breakdown" id="breakdown">
-    <h3 id="breakdown-heading">${sel.route}-year route · ${BASIS_LABELS[b]}</h3>
+    <h3 id="breakdown-heading">${sel.route}-year route · ${basisLabel(b)}</h3>
     ${switcher}
     ${chip}
     ${note}
@@ -664,7 +850,7 @@ function applyHTML(an, model, sel) {
     <div class="table-scroll">
       <table class="table grid">
         <caption class="sr-only">Whether each route is met for an application in ${formatMonth(model.applyIn)}</caption>
-        <thead><tr><th scope="col">Route</th>${BASES.map((b) => `<th scope="col">${BASIS_LABELS[b]}</th>`).join("")}</tr></thead>
+        <thead><tr><th scope="col">Route</th>${BASES.map((b) => `<th scope="col">${basisLabel(b)}</th>`).join("")}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -691,7 +877,7 @@ function compareHTML() {
       const tail = s.worst
         ? (s.worst.m === s.best.m ? "Same under all three" : `All three by ${fd(s.worst.m, s.worst.b)}`)
         : `Not reached on ${s.missing.map((b) => BASIS_NOUN[b]).join(" or ")} basis`;
-      return `<td><strong>${fd(s.best.m, s.best.b)}</strong><span class="sub">${BASIS_LABELS[s.best.b]}</span><span class="sub">${tail}</span></td>`;
+      return `<td><strong>${fd(s.best.m, s.best.b)}</strong><span class="sub">${basisLabel(s.best.b)}</span><span class="sub">${tail}</span></td>`;
     };
     const sa = spread(A, r), sb = spread(B, r);
     if (sa && sb && sa.best.m !== sb.best.m) {
@@ -715,7 +901,11 @@ function compareHTML() {
 }
 
 function printSummaryHTML(model) {
-  const hist = model.history.map((h) => `<li>From ${formatMonth(h.from)}: ${formatGBP(h.salary)} a year</li>`).join("");
+  const hist = model.source === "hmrc"
+    ? model.segments.map((g) => `<li>${esc(g.label)}: ${formatGBP(g.total)} (HMRC figure)</li>`).join("") +
+      `<li>From ${formatMonth(model.projStart)}: ${formatGBP(model.currentSalary)} a year</li>` +
+      "<li>Calendar-year and rolling results are estimates based on these tax-year totals.</li>"
+    : model.history.map((h) => `<li>From ${formatMonth(h.from)}: ${formatGBP(h.salary)} a year</li>`).join("");
   const plan = (k) => {
     const sc = model.scenarios[k];
     if (sc.mode === "keep") return "keep current salary";
@@ -812,6 +1002,17 @@ function bindForm() {
 
   form.addEventListener("change", (e) => {
     const el = e.target;
+    if (el.name === "source") {
+      state.source = el.value === "hmrc" ? "hmrc" : "periods";
+      // Switching to HMRC: start the current salary from the salary history, if there is one.
+      if (state.source === "hmrc" && !state.hmrc.currentSalary) {
+        const cur = state.history[currentIndex()];
+        if (cur && parseSalary(cur.salary) !== null) state.hmrc.currentSalary = cur.salary;
+      }
+      renderSource();
+      update();
+      return;
+    }
     if (el.name === "mode") {
       state.scenarios[ui.active].mode = el.value;
       renderPlan();
@@ -850,6 +1051,7 @@ function bindForm() {
       case "add-change": addRow("change", false); break;
       case "add-change-gap": addRow("change", true); break;
       case "remove": removeRow(t.dataset.kind, t.dataset.id); break;
+      case "prorata": estimatePartYear(); break;
       case "scenario": setActive(t.dataset.key); $(`#plan-switch [data-key="${t.dataset.key}"]`)?.focus(); break;
     }
   });
@@ -868,7 +1070,7 @@ function bindResults() {
       ui.at = a === "select-apply" ? "apply" : "earliest";
       ui.scroll = true;
       renderResults();
-      announce(`Showing the breakdown for the ${t.dataset.route}-year route, ${BASIS_LABELS[t.dataset.basis]}.`);
+      announce(`Showing the breakdown for the ${t.dataset.route}-year route, ${basisLabel(t.dataset.basis)}.`);
       return;
     }
     if (a === "at") { ui.at = t.dataset.at; renderResults(); }

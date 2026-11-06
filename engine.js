@@ -136,11 +136,16 @@ function validate(raw, rules, { asOf } = {}) {
   }
 
   const horizonEnd = routeStart === null ? null : routeStart + rules.horizonYears * 12;
+  const source = raw?.source === "hmrc" ? "hmrc" : "periods";
 
-  // Salary history
+  // Past earnings: salary periods, or HMRC tax-year totals
   const history = [];
-  const rows = Array.isArray(raw?.history) ? raw.history : [];
-  if (rows.length === 0) err("history", "Add at least one salary period.");
+  let hmrc = { segments: [], projStart: null, currentSalary: null };
+  const rows = source === "periods" && Array.isArray(raw?.history) ? raw.history : [];
+  if (source === "periods" && rows.length === 0) err("history", "Add at least one salary period.");
+  if (source === "hmrc" && routeStart !== null && (asOf === undefined || routeStart <= asOf)) {
+    hmrc = validateHMRC(raw?.hmrc, routeStart, asOf ?? routeStart, rules, err);
+  }
   const seen = new Map();
   rows.forEach((row, i) => {
     const from = parseMonth(row?.from);
@@ -170,7 +175,13 @@ function validate(raw, rules, { asOf } = {}) {
     if (rowOk) history.push({ from, salary, row: i });
   });
   history.sort((a, b) => a.from - b.from);
-  const lastHistoryFrom = history.length ? history[history.length - 1].from : null;
+  // Projected changes must start after the last month covered by past data.
+  const lastDataMonth = source === "periods"
+    ? (history.length ? history[history.length - 1].from : null)
+    : (hmrc.projStart === null ? null : hmrc.projStart - 1);
+  const lastDataMessage = source === "periods"
+    ? `A projected change must start after your current salary (from ${formatMonth(lastDataMonth ?? 0)}). Put past changes in your salary history.`
+    : `A projected change must start after your HMRC figures end (${formatMonth(lastDataMonth ?? 0)}).`;
 
   // Scenarios
   const scenarios = {};
@@ -189,8 +200,8 @@ function validate(raw, rules, { asOf } = {}) {
           err(`${p}.from`, "Enter the month this change starts."); ok = false;
         } else if (from === null) {
           err(`${p}.from`, "Enter a month in the format YYYY-MM."); ok = false;
-        } else if (lastHistoryFrom !== null && from <= lastHistoryFrom) {
-          err(`${p}.from`, `A projected change must start after your current salary (from ${formatMonth(lastHistoryFrom)}). Put past changes in your salary history.`); ok = false;
+        } else if (lastDataMonth !== null && from <= lastDataMonth) {
+          err(`${p}.from`, lastDataMessage); ok = false;
         } else if (asOf !== undefined && from < asOf) {
           err(`${p}.from`, "This date is in the past. Put past changes in your salary history."); ok = false;
         } else if (horizonEnd !== null && from >= horizonEnd) {
@@ -235,8 +246,116 @@ function validate(raw, rules, { asOf } = {}) {
   return {
     ok,
     errors,
-    model: ok ? { routeStart, history: history.map(({ from, salary }) => ({ from, salary })), scenarios, applyIn } : null
+    model: ok ? {
+      routeStart, source,
+      history: history.map(({ from, salary }) => ({ from, salary })),
+      segments: hmrc.segments, projStart: hmrc.projStart, currentSalary: hmrc.currentSalary,
+      scenarios, applyIn
+    } : null
   };
+}
+
+// ---------------------------------------------------------------------------
+// HMRC tax-year totals
+
+const nonEmpty = (v) => v !== undefined && v !== null && String(v).trim() !== "";
+
+/** Tax year (by its starting calendar year) that contains month idx. */
+function taxYearOf(idx, rules) {
+  return yearOf(idx - (rules.taxYearStartMonth - 1));
+}
+
+/** First month of tax year ty. */
+function taxYearStart(ty, rules) {
+  return monthIndex(ty, rules.taxYearStartMonth);
+}
+
+/** "2023/24" */
+function taxYearLabel(ty) {
+  return `${ty}/${String((ty + 1) % 100).padStart(2, "0")}`;
+}
+
+/**
+ * The tax-year rows to ask for in HMRC mode:
+ * - partYear: the tax year the route started in, from the route start to 5 April (if before the current tax year)
+ * - fullYears: each complete tax year after that
+ * - current: the open tax year, for a year-to-date figure
+ */
+function hmrcRows(routeStart, asOf, rules) {
+  if (routeStart === null || asOf === null || asOf === undefined || routeStart > asOf) return null;
+  const firstTY = taxYearOf(routeStart, rules);
+  const currentTY = taxYearOf(asOf, rules);
+  const out = { firstTY, currentTY, partYear: null, fullYears: [], current: null };
+  if (firstTY < currentTY) {
+    const end = taxYearStart(firstTY + 1, rules);
+    out.partYear = { ty: firstTY, label: taxYearLabel(firstTY), start: routeStart, end, months: end - routeStart };
+    for (let ty = firstTY + 1; ty < currentTY; ty++) {
+      out.fullYears.push({ ty, label: taxYearLabel(ty), start: taxYearStart(ty, rules), end: taxYearStart(ty + 1, rules) });
+    }
+  }
+  out.current = {
+    ty: currentTY, label: taxYearLabel(currentTY),
+    start: Math.max(routeStart, taxYearStart(currentTY, rules)),
+    end: taxYearStart(currentTY + 1, rules)
+  };
+  return out;
+}
+
+/** Pro-rata share of a full tax-year total for the months on route. */
+function proRata(fullYearTotal, months) {
+  return (fullYearTotal * months) / 12;
+}
+
+/** Annual equivalent of a year-to-date figure covering months [start, to]. */
+function annualise(ytd, start, to) {
+  const months = to - start + 1;
+  return months > 0 ? (ytd * 12) / months : null;
+}
+
+function validateHMRC(h, routeStart, asOf, rules, err) {
+  const out = { segments: [], projStart: null, currentSalary: null };
+  const rows = hmrcRows(routeStart, asOf, rules);
+  if (!rows) return out;
+
+  const amount = (path, v, missing) => {
+    if (!nonEmpty(v)) { err(path, missing); return null; }
+    const n = parseSalary(v);
+    if (n === null) { err(path, "Enter an amount in pounds, for example 45000."); return null; }
+    if (n < 0) { err(path, "The amount can't be negative."); return null; }
+    if (n > MAX_SALARY) { err(path, "That amount looks too large."); return null; }
+    return n;
+  };
+
+  if (rows.partYear) {
+    const p = rows.partYear;
+    const v = amount("hmrc.firstPart", h?.firstPart,
+      `Enter your taxable pay from ${formatMonth(p.start)} to 5 April ${p.ty + 1}. Use 0 if you had none.`);
+    if (v !== null) out.segments.push({ start: p.start, end: p.end, total: v, label: p.label });
+  }
+  for (const y of rows.fullYears) {
+    const v = amount(`hmrc.years.${y.ty}`, h?.years?.[y.ty],
+      `Enter the HMRC total for ${y.label}. Use 0 if you had no taxable pay.`);
+    if (v !== null) out.segments.push({ start: y.start, end: y.end, total: v, label: y.label });
+  }
+
+  let projStart = rows.current.start;
+  if (nonEmpty(h?.ytd) || nonEmpty(h?.ytdTo)) {
+    const v = amount("hmrc.ytd", h?.ytd, `Enter your taxable pay so far in ${rows.current.label}, or clear the month.`);
+    const to = parseMonth(h?.ytdTo);
+    if (!nonEmpty(h?.ytdTo)) err("hmrc.ytdTo", "Enter the month your year-to-date figure runs to.");
+    else if (to === null) err("hmrc.ytdTo", "Enter a month in the format YYYY-MM.");
+    else if (to < rows.current.start || to >= rows.current.end) {
+      err("hmrc.ytdTo", `This must be in the ${rows.current.label} tax year, from ${formatMonth(rows.current.start)}.`);
+    } else if (to > asOf) err("hmrc.ytdTo", "This can't be in the future.");
+    else {
+      projStart = to + 1;
+      if (v !== null) out.segments.push({ start: rows.current.start, end: to + 1, total: v, label: `${rows.current.label} so far` });
+    }
+  }
+  out.projStart = projStart;
+  out.currentSalary = amount("hmrc.currentSalary", h?.currentSalary,
+    "Enter your current annual salary. It's used from the end of your HMRC figures onwards.");
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +367,9 @@ function validate(raw, rules, { asOf } = {}) {
  */
 function salarySteps(model, key) {
   const sc = model.scenarios[key];
-  const steps = model.history.map((h) => ({ ...h, kind: "history" }));
+  const steps = model.source === "hmrc"
+    ? [{ from: model.projStart, salary: model.currentSalary, kind: "current" }]
+    : model.history.map((h) => ({ ...h, kind: "history" }));
   if (sc && sc.mode === "projected") {
     for (const c of sc.changes) steps.push({ ...c, kind: "projected" });
   }
@@ -270,11 +391,16 @@ function buildTimeline(model, key, rules, { asOf } = {}) {
   const lastFrom = steps.length ? steps[steps.length - 1].from : start;
   const anchor = Math.max(lastFrom, asOf ?? lastFrom);
 
+  // HMRC mode: each tax-year total (or part-year / year-to-date figure) is
+  // spread evenly across the months it covers.
+  const segments = model.segments || [];
   const annual = new Float64Array(length);
   let s = -1;
   for (let i = 0; i < length; i++) {
     const idx = start + i;
     while (s + 1 < steps.length && steps[s + 1].from <= idx) s++;
+    const seg = segments.find((g) => idx >= g.start && idx < g.end);
+    if (seg) { annual[i] = (seg.total * 12) / (seg.end - seg.start); continue; }
     let value = s >= 0 ? steps[s].salary : 0;
     if (growth !== 0 && idx >= anchor + 12) {
       value = value * Math.pow(1 + growth, Math.floor((idx - anchor) / 12));
@@ -283,7 +409,11 @@ function buildTimeline(model, key, rules, { asOf } = {}) {
   }
   const prefix = new Float64Array(length + 1);
   for (let i = 0; i < length; i++) prefix[i + 1] = prefix[i] + annual[i];
-  return { key, start, end, length, annual, prefix, steps, growth, growthAnchor: anchor };
+  return {
+    key, start, end, length, annual, prefix, steps, growth, growthAnchor: anchor,
+    source: model.source || "periods",
+    dataEnd: model.source === "hmrc" ? model.projStart : null
+  };
 }
 
 /** Earnings in months [a, b) (b exclusive). Months outside the timeline earn £0. */
@@ -473,13 +603,18 @@ function joinAnd(items) {
 }
 
 /** Why a single counted year fell short. */
-function explainYear(tl, year, threshold) {
+function explainYear(tl, year, threshold, basis = "tax") {
   if (year.pass) return `${year.label} passes with ${formatGBP(year.total)}.`;
   const short = formatGBP(year.shortBy);
   if (year.monthsBeforeStart > 0) {
     const onRoute = 12 - year.monthsBeforeStart;
     if (onRoute <= 0) return `${year.label} falls ${short} short because it is before your route started.`;
     return `${year.label} falls ${short} short because only ${onRoute} month${onRoute === 1 ? "" : "s"} of it ${onRoute === 1 ? "is" : "are"} after your route start (${formatMonth(tl.start)}).`;
+  }
+  if (tl.source === "hmrc" && tl.dataEnd !== null && year.start < tl.dataEnd) {
+    const proj = year.end > tl.dataEnd ? ` and your expected salary from ${formatMonth(tl.dataEnd)}` : "";
+    const est = basis === "tax" ? "" : " This is an estimate, because each tax-year total is spread evenly across its months.";
+    return `${year.label} falls ${short} short, based on your HMRC figures${proj}.${est}`;
   }
   const changes = changesWithin(tl, year.start, year.end);
   if (changes.length) {
@@ -498,8 +633,7 @@ function explainYear(tl, year, threshold) {
  */
 function explain(tl, res, ev, rules) {
   const lines = [];
-  const noun = BASIS_NOUN[res.basis];
-  const yearsWord = res.basis === "rolling" ? "12-month blocks" : `${noun} years`;
+  const yearsWord = { tax: "tax years", calendar: "calendar years", rolling: "12-month blocks" }[res.basis];
   const fd = (m) => formatDate(m, res.basis, rules);
 
   lines.push(`At ${fd(ev.month)}, ${ev.passCount} of the ${ev.window} ${yearsWord} counted reach ${formatGBP(ev.threshold)}; ${ev.need} ${ev.need === 1 ? "is" : "are"} needed.`);
@@ -528,12 +662,12 @@ function explain(tl, res, ev, rules) {
   } else if (res.firstCandidate > res.horizonEnd) {
     lines.push(`${res.route} years on your route would end after the ${rules.horizonYears}-year horizon.`);
   } else if (res.maxPassCount === 0) {
-    lines.push(`No ${res.basis === "rolling" ? "12-month block" : `${noun} year`} reaches ${formatGBP(res.threshold)} before ${formatMonth(res.horizonEnd)}, the end of the ${rules.horizonYears}-year horizon.`);
+    lines.push(`No ${{ tax: "tax year", calendar: "calendar year", rolling: "12-month block" }[res.basis]} reaches ${formatGBP(res.threshold)} before ${formatMonth(res.horizonEnd)}, the end of the ${rules.horizonYears}-year horizon.`);
   } else {
     lines.push(`Before ${formatMonth(res.horizonEnd)}, the end of the ${rules.horizonYears}-year horizon, at most ${res.maxPassCount} of the ${res.window} ${yearsWord} pass at any one time.`);
   }
 
-  for (const y of ev.years) if (!y.pass) lines.push(explainYear(tl, y, ev.threshold));
+  for (const y of ev.years) if (!y.pass) lines.push(explainYear(tl, y, ev.threshold, res.basis));
   return lines;
 }
 
@@ -554,7 +688,7 @@ function toCSV(analyses, labels, rules) {
         rows.push([
           labels[a.key] || a.key,
           `${r}-year`,
-          BASIS_LABELS[b],
+          BASIS_LABELS[b] + (a.timeline.source === "hmrc" && b !== "tax" ? " (estimate)" : ""),
           res.earliest === null ? "Not reached" : formatDate(res.earliest, b, rules),
           res.lapse === null ? "" : formatDate(res.lapse, b, rules),
           rules.routes[r].threshold,
@@ -617,7 +751,13 @@ const ILREngine = {
   explain,
   toCSV,
   encodeState,
-  decodeState
+  decodeState,
+  hmrcRows,
+  taxYearOf,
+  taxYearStart,
+  taxYearLabel,
+  proRata,
+  annualise
 };
 
 if (typeof module === "object" && module.exports) module.exports = ILREngine;
